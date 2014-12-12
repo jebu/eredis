@@ -14,7 +14,7 @@
 
 
 %% API
--export([start_link/6, stop/1]).
+-export([start_link/6, start_link/7, stop/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -32,7 +32,9 @@
                  QueueBehaviour::drop | exit) ->
                         {ok, Pid::pid()} | {error, Reason::term()}.
 start_link(Host, Port, Password, ReconnectSleep, MaxQueueSize, QueueBehaviour) ->
-    Args = [Host, Port, Password, ReconnectSleep, MaxQueueSize, QueueBehaviour],
+  start_link(Host, Port, Password, 0, ReconnectSleep, MaxQueueSize, QueueBehaviour).
+start_link(Host, Port, Password, Database, ReconnectSleep, MaxQueueSize, QueueBehaviour) ->
+    Args = [Host, Port, Password, Database, ReconnectSleep, MaxQueueSize, QueueBehaviour],
     gen_server:start_link(?MODULE, Args, []).
 
 
@@ -43,10 +45,11 @@ stop(Pid) ->
 %% gen_server callbacks
 %%====================================================================
 
-init([Host, Port, Password, ReconnectSleep, MaxQueueSize, QueueBehaviour]) ->
+init([Host, Port, Password, Database, ReconnectSleep, MaxQueueSize, QueueBehaviour]) ->
     State = #state{host            = Host,
                    port            = Port,
                    password        = list_to_binary(Password),
+                   database        = list_to_binary(integer_to_list(Database)),
                    reconnect_sleep = ReconnectSleep,
                    channels        = [],
                    parser_state    = eredis_parser:init(),
@@ -146,7 +149,6 @@ handle_cast(_Msg, State) ->
 %% Receive data from socket, see handle_response/2
 handle_info({tcp, _Socket, Bs}, State) ->
     ok = inet:setopts(State#state.socket, [{active, once}]),
-
     NewState = handle_response(Bs, State),
     case queue:len(NewState#state.msg_queue) > NewState#state.max_queue_size of
         true ->
@@ -303,15 +305,26 @@ connect(State) ->
         {ok, Socket} ->
             case authenticate(Socket, State#state.password) of
                 ok ->
-                    {ok, State#state{socket = Socket}};
+                    case select_database(Socket, State#state.database) of
+                        ok ->
+                            {ok, State#state{socket = Socket}};
+                        {error, Reason} ->
+                            {error, {select_error, Reason}}
+                    end;
                 {error, Reason} ->
                     {error, {authentication_error, Reason}}
             end;
         {error, Reason} ->
             {error, {connection_error, Reason}}
     end.
-
-
+%
+select_database(_Socket, undefined) ->
+    ok;
+select_database(_Socket, <<"0">>) ->
+    ok;
+select_database(Socket, Database) ->
+    do_sync_command(Socket, ["SELECT", " ", Database, "\r\n"]).
+%
 authenticate(_Socket, <<>>) ->
     ok;
 authenticate(Socket, Password) ->
@@ -320,11 +333,13 @@ authenticate(Socket, Password) ->
 %% @doc: Executes the given command synchronously, expects Redis to
 %% return "+OK\r\n", otherwise it will fail.
 do_sync_command(Socket, Command) ->
+    ok = inet:setopts(Socket, [{active, false}]),
     case gen_tcp:send(Socket, Command) of
         ok ->
             %% Hope there's nothing else coming down on the socket..
             case gen_tcp:recv(Socket, 0, ?RECV_TIMEOUT) of
                 {ok, <<"+OK\r\n">>} ->
+                    ok = inet:setopts(Socket, [{active, once}]),
                     ok;
                 Other ->
                     {error, {unexpected_data, Other}}

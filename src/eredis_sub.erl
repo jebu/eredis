@@ -46,11 +46,12 @@ start_link(Host, Port, Password, ReconnectSleep,
 start_link(Args) ->
     Host           = proplists:get_value(host, Args, "127.0.0.1"),
     Port           = proplists:get_value(port, Args, 6379),
+    Database       = proplists:get_value(database, Args, 0),
     Password       = proplists:get_value(password, Args, ""),
     ReconnectSleep = proplists:get_value(reconnect_sleep, Args, 100),
     MaxQueueSize   = proplists:get_value(max_queue_size, Args, infinity),
     QueueBehaviour = proplists:get_value(queue_behaviour, Args, drop),
-    start_link(Host, Port, Password, ReconnectSleep,
+    eredis_sub_client:start_link(Host, Port, Password, Database, ReconnectSleep,
                MaxQueueSize, QueueBehaviour).
 
 stop(Pid) ->
